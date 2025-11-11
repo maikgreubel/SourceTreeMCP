@@ -1,0 +1,5 @@
+.continue/
+.venv/
+.vscode/
+__pycache__/
+server.log
