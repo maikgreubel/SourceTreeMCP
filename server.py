@@ -47,6 +47,20 @@ def sanitize_path(path: str) -> str:
     
     return realPath
 
+def get_files_from_git_tree(path: str) -> list[str]:
+    repo = Repo(os.path.abspath(basedir))
+    
+    entries:list[str]  = []
+    
+    for entry in repo.commit().tree.traverse():
+        epath = str(entry.path) # type: ignore
+        if len(path) == 0 or epath.startswith(path):
+            entries.append(epath)   
+    return entries
+    
+def is_git_repo() -> bool:
+    return os.path.exists(os.path.join(basedir, ".git"))
+
 @mcp.tool()
 def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
     """Retrieve a list of file names in *folder_path*, which is, if provided, a directory inside
@@ -70,11 +84,15 @@ def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
         A list of file names located directly under *folder_path*, which exists as sub directory
         of runtime argument base-dir, that match the given extension. The list does not include directory paths.
     """
-    logger.info(f"About to retrieve files from {folder_path}")
     
-    entries = []
+    if is_git_repo():
+        return get_files_from_git_tree(folder_path)
     
     dir = sanitize_path(os.path.join(basedir, folder_path))
+    
+    logger.info(f"About to retrieve files from {dir}")
+    
+    entries = []
     
     if os.path.exists(dir):
         entries = os.listdir(dir)
@@ -392,20 +410,27 @@ def get_files_for_extension(path:str, exts:list[str]) -> list[str]:
     
     filesToAnalyze:list[str] = []
     
-    sanitize_path(os.path.join(basedir, path))
-    
-    for root, _, files in os.walk(path): # type: ignore
-        for file in files:
-            entry = os.path.join(root, file).replace("\\", "/")
-            if entry.find("/.git/") > 0:
-                continue
-            
-            logger.debug(f"About to check file: {entry}")
-            
-            if not os.path.isdir(entry):
-                if file.endswith(tuple([f".{ext}" for ext in exts])):
-                    logger.debug(f"Adding {entry} to list of files to analyze")
-                    filesToAnalyze.append(entry)
+    if is_git_repo():
+        repo = Repo(".")
+        for entry in repo.commit().tree.traverse():
+            file = str(entry.abspath) # type: ignore
+            if file.endswith(tuple([f".{ext}" for ext in exts])):
+                filesToAnalyze.append(file)
+    else:
+        sanitize_path(os.path.join(basedir, path))
+        
+        for root, _, files in os.walk(path): # type: ignore
+            for file in files:
+                entry = os.path.join(root, file).replace("\\", "/")
+                if entry.find("/.git/") > 0:
+                    continue
+                
+                logger.debug(f"About to check file: {entry}")
+                
+                if not os.path.isdir(entry):
+                    if file.endswith(tuple([f".{ext}" for ext in exts])):
+                        logger.debug(f"Adding {entry} to list of files to analyze")
+                        filesToAnalyze.append(entry)
     
     return filesToAnalyze
 
