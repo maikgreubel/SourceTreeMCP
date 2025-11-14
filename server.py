@@ -499,6 +499,30 @@ def get_diff_for_commit(older_commit_hash: str = 'HEAD~1', newer_commit_hash: st
     
     return "No git repository found in the basedir."
 
+@mcp.tool()
+def search_commits_containing_change(pattern:str) -> str:
+    """Retrieve a list of commit hashes that contain changes matching the given pattern in the global runtime parameter basedir provided at start of server.
+
+    Parameters
+    ----------
+    pattern : str
+        The pattern to search for in commit messages or diffs.
+
+    Returns
+    -------
+    str
+        A string containing the commit hashes separated by newlines.
+    """
+    global basedir
+    
+    
+    commits:str = ""
+    gitDir = os.path.join(basedir, '.git')
+    if os.path.exists(gitDir) and os.path.isdir(gitDir):
+        repo = Repo(basedir)
+        commits = repo.git.log(G=pattern, pretty='oneline')
+
+    return commits
 
 def main():
     """Start the server and handle incoming requests. This method will initialize the global basedir variable with the value provided as runtime argument, then start the FastMCP server.
