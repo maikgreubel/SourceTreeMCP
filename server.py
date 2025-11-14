@@ -21,6 +21,21 @@ mcp = FastMCP("Source Tree Server")
 
 basedir = ""
 
+def sanitize_path(path: str) -> str:
+    """
+    Sanitize the given path by replacing any backslashes with forward slashes. Also checking for directory traversal.
+
+    Args:
+        path (str): The path to sanitize.
+
+    Returns:
+        str: The sanitized path.
+    """
+    realPath = os.path.realpath(path).replace("\\", "/")
+    if not realPath.startswith(basedir):
+        raise ValueError("Path traversal detected")
+    return realPath
+
 @mcp.tool()
 def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
     """Retrieve a list of file names in *folder_path*, which is, if provided, a directory inside
@@ -48,9 +63,7 @@ def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
     
     entries = []
     
-    global basedir
-    
-    dir = os.path.join(basedir, folder_path)
+    dir = sanitize_path(os.path.join(basedir, folder_path))
     
     if os.path.exists(dir):
         entries = os.listdir(dir)
@@ -85,9 +98,7 @@ def get_file_info(path:str) -> Dict[str, str]:
     """
     logger.info(f"About to retrieve file info from {path}")
 
-    global basedir
-
-    fullPath = os.path.join(basedir, path)
+    fullPath = sanitize_path(os.path.join(basedir, path))
 
     if not os.path.isfile(fullPath):
         return {}
@@ -122,9 +133,7 @@ def get_file_content(path:str) -> str:
     """
     logger.info(f"About to retrieve file content from {path}")
 
-    global basedir
-
-    fullPath = os.path.join(basedir, path)
+    fullPath = sanitize_path(os.path.join(basedir, path))
 
     if not os.path.isfile(fullPath):
         return ""
@@ -151,7 +160,7 @@ def get_directories(path:str = "") -> list[str]:
     """
     logger.info(f"About to retrieve directories from {path}")
 
-    fullPath = os.path.join(basedir, path)
+    fullPath = sanitize_path(os.path.join(basedir, path))
     
     if not os.path.isdir(fullPath):
         return []
@@ -193,6 +202,8 @@ def detect_languages(path: str, languageCounter: Counter[str]) -> Counter[str]:
     
     numFiles = 0
     
+    path = sanitize_path(os.path.join(basedir, path))
+    
     for root, _, files in os.walk(path): # type: ignore
         for file in files:
             if os.path.isdir(os.path.join(path, file)):
@@ -214,8 +225,6 @@ def get_language_stats() -> dict[str,str]:
     dict[str,str]
         A dictionary containing the number (as string) of files found for each language.
     """
-    global basedir
-    
     languageCounter:Counter[str] = Counter()
     
     languageCounter = detect_languages(basedir, languageCounter)
@@ -285,11 +294,9 @@ def get_repo_info() -> dict[str,str]:
     dict[str,str]
         A dictionary containing information about the git repository located at the given *basedir*. The keys and values are strings.
     """
-    global basedir
-    
     repoInfo:dict[str,str] = {}
     
-    gitDir = os.path.join(basedir, '.git')
+    gitDir = sanitize_path(os.path.join(basedir, '.git'))
     
     if os.path.exists(gitDir) and os.path.isdir(gitDir):
         repo = Repo(basedir)
@@ -333,18 +340,18 @@ def lizard_analysis_to_dataframe(results: list[lizard.FileInformation]) -> pd.Da
     records:list[dict[str,str]] = []
     
     for fileinfo in results:
-        nloc_file = fileinfo.nloc
+        nloc_file = fileinfo.nloc # type: ignore
         max_ccn:int = 0
         
-        for func_info in fileinfo.function_list:
-            if int(func_info.cyclomatic_complexity) > max_ccn:
-                max_ccn = int(func_info.cyclomatic_complexity)
+        for func_info in fileinfo.function_list: # type: ignore
+            if int(func_info.cyclomatic_complexity) > max_ccn: # type: ignore
+                max_ccn = int(func_info.cyclomatic_complexity) # type: ignore
 
         records.append({
-            'filename': fileinfo.filename,
+            'filename': fileinfo.filename, # type: ignore
             'max_ccn': str(max_ccn),
             'nloc': nloc_file,
-            'func_count': str(len(fileinfo.function_list))
+            'func_count': str(len(fileinfo.function_list)) # type: ignore
         })
     return pd.DataFrame(records)
 
@@ -373,6 +380,8 @@ def get_files_for_extension(path:str, exts:list[str]) -> list[str]:
     logger.info(f"About to get files for extensions in path {path}")
     
     filesToAnalyze:list[str] = []
+    
+    sanitize_path(os.path.join(basedir, path))
     
     for root, _, files in os.walk(path): # type: ignore
         for file in files:
@@ -405,8 +414,6 @@ def get_code_metrics() -> dict[str, str]:
     dict[str, str]
         A dictionary containing code metrics for the source tree located at the given *basedir*. The keys and values are strings.
     """
-    global basedir
-    
     df = pd.DataFrame()
     filesToAnalyze = get_files_for_extension(basedir, get_source_extensions())
     logger.info(f"About to analyze {len(filesToAnalyze)} files")
@@ -414,10 +421,10 @@ def get_code_metrics() -> dict[str, str]:
     fi:list[lizard.FileInformation] = []
     
     for file in filesToAnalyze:    
-        fi.append(lizard.analyze_file.analyze_source_code(file, Path(file).read_text()))
+        fi.append(lizard.analyze_file.analyze_source_code(file, Path(file).read_text())) # type: ignore
 
     df = lizard_analysis_to_dataframe(fi)
-    return df.to_json()
+    return df.to_json() # type: ignore
 
 @mcp.tool()
 def get_line_counts() -> dict[str, int]:
@@ -428,17 +435,15 @@ def get_line_counts() -> dict[str, int]:
     dict[str, int]
         A dictionary containing the number (as integer) of lines for each file.
     """
-    global basedir
-    
     filesToAnalyze = get_files_for_extension(basedir, get_source_extensions())
     logger.info(f"About to analyze {len(filesToAnalyze)} files")
     
     projectSummary = ProjectSummary()
     
     for file in filesToAnalyze:
-        projectSummary.add(SourceAnalysis.from_file(file, group="pygount"))
+        projectSummary.add(SourceAnalysis.from_file(file, group="pygount")) # type: ignore
 
-    return str(projectSummary)
+    return str(projectSummary) # type: ignore
 
 @mcp.tool()
 def get_last_n_commits(count:int = 10) -> list[str]:
@@ -454,8 +459,6 @@ def get_last_n_commits(count:int = 10) -> list[str]:
     list[str]
         A list containing the last *count* commit hashes.
     """
-    global basedir
-
     commits:list[str] = []
 
     gitDir = os.path.join(basedir, '.git')
@@ -484,8 +487,6 @@ def get_diff_for_commit(older_commit_hash: str = 'HEAD~1', newer_commit_hash: st
     str
         A string containing the diff between the two commits.
     """
-
-    global basedir
     gitDir = os.path.join(basedir, '.git')
     
     if os.path.exists(gitDir) and os.path.isdir(gitDir):
@@ -513,9 +514,6 @@ def search_commits_containing_change(pattern:str) -> str:
     str
         A string containing the commit hashes separated by newlines.
     """
-    global basedir
-    
-    
     commits:str = ""
     gitDir = os.path.join(basedir, '.git')
     if os.path.exists(gitDir) and os.path.isdir(gitDir):
@@ -535,13 +533,21 @@ def main():
     -------
     None
     """
-    logging.basicConfig(
-        filename="server.log",
-        encoding="utf-8",
-        level=logging.INFO,
-        format='%(asctime)s %(message)s',
-        datefmt='%Y-%m-d %H:%M:%S'
-    )
+    if os.access(os.getcwd(), os.W_OK):
+        logging.basicConfig(
+            filename="server.log",
+            encoding="utf-8",
+            level=logging.INFO,
+            format='%(asctime)s %(message)s',
+            datefmt='%Y-%m-d %H:%M:%S'
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s %(message)s',
+            datefmt='%Y-%m-d %H:%M:%S'
+        )
+
     logging.getLogger().setLevel(logging.INFO)
     
     parser = argparse.ArgumentParser(description="MCP Server for a source tree")
@@ -555,7 +561,7 @@ def main():
     args = parser.parse_args()
     
     global basedir
-    basedir = args.base_dir
+    basedir = os.path.realpath(args.base_dir).replace("\\", "/")
     
     if args.transport == "sse":
         logger.info(f"Starting Source Tree MCP server")
