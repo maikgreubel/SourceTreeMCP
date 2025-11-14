@@ -31,9 +31,20 @@ def sanitize_path(path: str) -> str:
     Returns:
         str: The sanitized path.
     """
+    if not basedir:
+        raise ValueError("Base directory (basedir) is not set.")
+    
+    # Replace backslashes with forward slashes
     realPath = os.path.realpath(path).replace("\\", "/")
-    if not realPath.startswith(basedir):
+    
+    # Normalize both paths to handle any symbolic links
+    basePath = os.path.abspath(os.path.realpath(basedir)).replace("\\", "/")
+    realPath = os.path.abspath(realPath).replace("\\", "/")
+    
+    # Check if the sanitized path starts with the base directory
+    if not realPath.startswith(basePath):
         raise ValueError("Path traversal detected")
+    
     return realPath
 
 @mcp.tool()
