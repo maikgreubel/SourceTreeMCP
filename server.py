@@ -440,6 +440,65 @@ def get_line_counts() -> dict[str, int]:
 
     return str(projectSummary)
 
+@mcp.tool()
+def get_last_n_commits(count:int = 10) -> list[str]:
+    """Retrieve a list of the last *count* commit hashes in the global runtime parameter basedir provided at start of server.
+
+    Parameters
+    ----------
+    count : int, optional
+        The number of commits to retrieve. Defaults to 10.
+
+    Returns
+    -------
+    list[str]
+        A list containing the last *count* commit hashes.
+    """
+    global basedir
+
+    commits:list[str] = []
+
+    gitDir = os.path.join(basedir, '.git')
+    
+    if os.path.exists(gitDir) and os.path.isdir(gitDir):
+        repo = Repo(basedir)
+        
+        for commit in repo.iter_commits(max_count=count):
+            commits.append(str(commit))
+    
+    return commits
+
+@mcp.tool()
+def get_diff_for_commit(older_commit_hash: str = 'HEAD~1', newer_commit_hash: str = 'HEAD') -> str:
+    """Retrieve the diff between two commits in the global runtime parameter basedir provided at start of server.
+
+    Parameters
+    ----------
+    older_commit_hash : str, optional
+        The hash of the older commit. Defaults to 'HEAD~1'.
+    newer_commit_hash : str, optional
+        The hash of the newer commit. Defaults to 'HEAD'.
+
+    Returns
+    -------
+    str
+        A string containing the diff between the two commits.
+    """
+
+    global basedir
+    gitDir = os.path.join(basedir, '.git')
+    
+    if os.path.exists(gitDir) and os.path.isdir(gitDir):
+        repo = Repo(basedir)
+        diffs = repo.commit(older_commit_hash).diff(newer_commit_hash, create_patch=True)
+        diff = ""
+        for diffitem in diffs:
+            diff = diff + str(diffitem)
+
+        return diff
+    
+    return "No git repository found in the basedir."
+
 
 def main():
     """Start the server and handle incoming requests. This method will initialize the global basedir variable with the value provided as runtime argument, then start the FastMCP server.
