@@ -49,3 +49,10 @@ The server logs information to `server.log` if it has write access to the curren
 ## Contributing
 
 Contributions are welcome! Please fork the repository and submit pull requests with your improvements.
+
+## Noteworthy
+
+There are some models working better than others. Here a small list which have been tried successfully and which have some issues:
+
+- bartowski/qwen2.5-coder-14b-instruct-abliterated (Q4_K_S) works very well with tool use. Interacts with the MCP Server and uses tools effectively.
+- deepseek/deepseek-r1-0528-qwen3-8b (Q4_K_M) have problems calling the tools. Thinks to much about the execution of tools, uses them but don't notice, they give positive feedback.

@@ -4,3 +4,4 @@
 __pycache__/
 server.log
 typings/
+models/*

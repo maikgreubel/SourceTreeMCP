@@ -5,7 +5,9 @@ import mimetypes
 import datetime
 import lizard
 import pandas as pd
+import multiprocessing
 
+from llama_cpp import Llama
 from pygount import SourceAnalysis, ProjectSummary
 from git import Repo
 from pathlib import Path
@@ -13,13 +15,13 @@ from collections import Counter
 from fastmcp import FastMCP
 from typing import Dict
 
-
+MODEL_PATH = "models/Llama-3.3-70B-Instruct-Q4_K_M.gguf"
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("Source Tree Server")
 
-basedir = ""
+basedir = "unsloth/Llama-3.3-70B-Instruct-GGUF"
 
 def sanitize_path(path: str) -> str:
     """
@@ -47,14 +49,23 @@ def sanitize_path(path: str) -> str:
     
     return realPath
 
-def get_files_from_git_tree(path: str) -> list[str]:
+def get_files_from_git_tree(path: str, file_extension:str = "") -> list[str]:
+    """
+    Get a list of all files in the given Git tree.
+
+    Args:
+        path (str): The path to the Git tree.
+
+    Returns:
+        list[str]: A list of file paths.
+    """
     repo = Repo(os.path.abspath(basedir))
     
     entries:list[str]  = []
     
     for entry in repo.commit().tree.traverse():
         epath = str(entry.path) # type: ignore
-        if len(path) == 0 or epath.startswith(path):
+        if len(path) == 0 or epath.startswith(path) and (file_extension == "" or epath.endswith(file_extension)):
             entries.append(epath)   
     return entries
     
@@ -86,7 +97,7 @@ def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
     """
     
     if is_git_repo():
-        return get_files_from_git_tree(folder_path)
+        return get_files_from_git_tree(folder_path, file_extension)
     
     dir = sanitize_path(os.path.join(basedir, folder_path))
     
@@ -99,7 +110,8 @@ def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
         
     files = [f for f in entries if os.path.isfile(os.path.join(dir, f))]
     
-    if len(file_extension) > 0:
+    if not file_extension == "":
+        logger.info(f"Filtering files with extension {file_extension}")
         files = [f for f in files if f.endswith(file_extension)]
     
     return files
@@ -557,6 +569,85 @@ def search_commits_containing_change(pattern:str) -> str:
         commits = repo.git.log(G=pattern, pretty='oneline')
 
     return commits
+
+@mcp.tool()
+def make_directory(path:str) -> str:
+    """Create a new directory at the specified path. It will create all sub directories neccessary as well.
+
+    Parameters
+    ----------
+    path : str
+        The path where the new directory should be created.
+
+    Returns
+    -------
+    str
+        A string indicating whether the directory was successfully created or not.
+    """
+    path = sanitize_path(os.path.join(basedir, path))
+    try:
+        os.makedirs(path, exist_ok=True)
+        return f"Directory {path} created successfully."
+    except Exception as e:
+        result = repr(e)
+        logger.error(result)
+        return result
+
+@mcp.tool()
+def write_file(path:str, content:str) -> str:
+    """Write the given content to a file at the specified path. Creates parent directories if necessary.
+
+    Parameters
+    ----------
+    path : str
+        The path where the file should be written.
+    content : str
+        The content to write to the file.
+
+    Returns
+    -------
+    str
+        A string indicating whether the file was successfully written or not.
+    """
+    path = sanitize_path(os.path.join(basedir, path))
+    parent_dir = os.path.dirname(path)
+    if not os.path.exists(parent_dir):
+        logger.info(f"Creating directory {parent_dir}.")
+        os.makedirs(parent_dir)
+    with open(path, 'w') as f:
+        f.write(content)
+    return "File written successfully."
+    try:
+        with open(path, "w") as f:
+            f.write(content)
+        return "Succeeded to write file at {path}."
+    except Exception as e:
+        result = repr(e)
+        logger.error(result)
+        return result
+
+@mcp.tool()
+def delete_file(path:str) -> str:
+    """Delete the file located at the specified path.
+
+    Parameters
+    ----------
+    path : str
+        The path to the file that should be deleted.
+
+    Returns
+    -------
+    str
+        A string indicating whether the file was successfully deleted or not.
+    """
+    path = sanitize_path(os.path.join(basedir, path))
+    try:
+        os.remove(path)
+        return f"File {path} deleted successfully"
+    except Exception as e:
+        result = repr(e)
+        logger.error(result)
+        return result
 
 def main():
     """Start the server and handle incoming requests. This method will initialize the global basedir variable with the value provided as runtime argument, then start the FastMCP server.
