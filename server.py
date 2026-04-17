@@ -11,11 +11,27 @@ from llama_cpp import Llama
 from pygount import SourceAnalysis, ProjectSummary
 from git import Repo
 from pathlib import Path
-from collections import Counter
+from collections import Counter, deque
 from fastmcp import FastMCP
 from typing import Dict
 
-MODEL_PATH = "models/Llama-3.3-70B-Instruct-Q4_K_M.gguf"
+# The to llama-cpp-python compatible model
+MODEL_PATH = "models/Mixtral-8x7B-Instruct-v0.1-MXFP4_MOE-00001-of-00002.gguf"
+
+# We only allow to use maximum cores minus two in order to provide OS stability
+# and use as much resources as possible
+N_THREADS = multiprocessing.cpu_count() - 2
+
+# Size of context
+N_CONTEXT = 131072
+
+companion_llm = Llama(
+    model_path=MODEL_PATH,
+    n_ctx=N_CONTEXT,
+    n_threads=N_THREADS,
+    n_gpu_layers=0, # We want to use only CPU
+    verbose=True
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +84,113 @@ def get_files_from_git_tree(path: str, file_extension:str = "") -> list[str]:
         if len(path) == 0 or epath.startswith(path) and (file_extension == "" or epath.endswith(file_extension)):
             entries.append(epath)   
     return entries
+
+@mcp.tool()
+def get_file_size(path: str) -> int:
+    """Get the size of given file in bytes.
+
+    Parameters
+    ----------
+    path : str
+        The file inside of source tree to get the size of.
+
+    Returns
+    -------
+    int
+        The file size in bytes.
+    """
+    path = sanitize_path(os.path.join(basedir, path))
+    return os.path.getsize(path)
     
 def is_git_repo() -> bool:
     return os.path.exists(os.path.join(basedir, ".git"))
+
+@mcp.tool()
+def transpile_code(code:str) -> str:
+    """Transpiles code using companion LLM.
+
+    Parameters
+    ----------
+    code : str
+        The code to transpile.
+
+    Returns
+    -------
+    str
+        The transpiled code.
+    """
+    result = ""
+    
+    logger.info("Have been asked to transpile code")
+    
+    prompt = f"""
+    You act as a expert coding companion for an agent, in order to understand, analyze and transpile
+    code into C# programming language.
+    
+    C++-Code:
+    {code}
+    
+    C# ported code:
+    """
+    
+    output = companion_llm(
+        prompt=prompt,
+        max_tokens=1024,
+        temperature=0.2,
+        stop=["\nC++-Code:"],
+        echo=False
+    )
+    
+    logger.info("The transpiled code is read")
+    
+    result = f"\n--- Expert companion ported code ---{output["choices"][0]["text"]}"
+    
+    return result
+
+@mcp.tool()
+def ask_companion(question:str) -> str:
+    """Ask the companion LLM a question.
+    
+    The companion LLM acts as a expert in programming languages especially C++ and C#.
+    Parameters
+    ----------
+    question : str
+        The question to ask.
+
+    Returns
+    -------
+    str
+        The answer to the question.
+    """
+    result = ""
+    
+    logger.info("Have been asked for a question")
+    
+    prompt = f"""
+    You are an expert for programming languages, especially for C++ and C#. You are also
+    have an extensive knowledge of software design patterns and best practices. Transpiling
+    and portation of existing code into other languages is also part of your expertise.
+    
+    
+    Question:
+    {question}
+    
+    Answer:
+    """
+    
+    output = companion_llm(
+        prompt=prompt,
+        max_tokens=1024,
+        temperature=0.2,
+        stop=["\nQuestion:"],
+        echo=False
+    )
+    
+    result = f"\n--- Expert companion expertise ---{output["choices"][0]["text"]}"
+    
+    logger.info(f"My answer is ready:{result}")
+    
+    return result
 
 @mcp.tool()
 def get_files(folder_path:str = "", file_extension:str = "") -> list[str]:
@@ -157,7 +277,7 @@ def get_file_info(path:str) -> Dict[str, str]:
     return info
     
 @mcp.tool()
-def get_file_content(path:str) -> str:
+def get_file_content(path:str, start_line:int=0, end_line:int=0) -> str:
     """Retrieve the content of the file located at *path*, which is a directory inside
     the global runtime parameter basedir provided at start of server. The returned string will contain the contents of the file.
 
@@ -166,7 +286,11 @@ def get_file_content(path:str) -> str:
     path : str
         Path to the sub directory in basedir from which information should be retrieved. If a non empty string
         is passed, it will be joined to basedir global parameter.
-
+    start_line: int
+        The number of line where to start to read
+    end_line: int
+        The number of line where to stop reading
+        
     Returns
     -------
     str
@@ -179,7 +303,64 @@ def get_file_content(path:str) -> str:
     if not os.path.isfile(fullPath):
         return ""
 
-    return Path(fullPath).read_text()
+    content = ""
+    if start_line > 0 and end_line > 0 and start_line < end_line:
+        with open(fullPath, 'r') as fp:
+            for i, line in enumerate(fp):
+                if i >= start_line and i <= end_line:
+                    content = content + line + "\n"
+    else:
+        content = Path(fullPath).read_text()
+        
+    return content
+
+@mcp.tool()
+def grep(path:str, pattern:str, lines_before:int = 0, lines_after:int = 0) -> list[tuple[int,str]]:
+    """Searches for pattern in lines and returning them using their line number.
+    
+    Parameters
+    ----------
+    path : str
+        The path inside the source tree to search in.
+    pattern : str
+        The pattern to search for.
+    lines_before : int
+        The number of lines to return before the pattern.
+    lines_after : int
+        The number of lines to return after the pattern.
+
+    Returns
+    -------
+    list[tuple[int,str]]
+        The list of matches and their line numbers. In case of lines_before and/or lines_after,
+        the corresponding amount of lines before and after the match as well.
+    """
+    path = sanitize_path(os.path.join(basedir, path))
+    
+    result:list[tuple[int,str]] = []
+    
+    with open(path, 'r') as f:
+        fifo:deque[tuple[int,str]] = deque(maxlen=lines_before)
+        
+        lines_left_to_append:int = lines_after
+        
+        for i, line in enumerate(f):
+            if pattern in line:
+                matches = list(fifo)
+                matches.append((i, line))
+                result.extend(matches)
+                
+                result.append((i, line))
+            
+            if lines_left_to_append > 0:
+                result.append((i, line))
+                lines_left_to_append = lines_left_to_append - 1
+                continue
+            
+            fifo.append((i, line))
+        
+    return result
+    
 
 @mcp.tool()
 def get_directories(path:str = "") -> list[str]:
@@ -648,6 +829,35 @@ def delete_file(path:str) -> str:
         result = repr(e)
         logger.error(result)
         return result
+    
+@mcp.tool()
+def read_online_pdf(url:str) -> str:
+    """Read the content of a PDF file from an online URL.
+
+    Parameters
+    ----------
+    url : str
+        The URL of the PDF file to read.
+        
+    Returns
+    -------
+    str
+        the content of the PDF file as a markdown string.
+    """
+    import tempfile
+    import requests
+    from docling.document_converter import DocumentConverter
+    tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    r = requests.get(url=url, stream=True)
+    with open(tmpfile.name, "wb") as f:
+        for chunk in r.iter_content(1024):
+            f.write(chunk)
+    converter = DocumentConverter()
+    documents = converter.convert_all(tmpfile.name)
+    result = ""
+    for doc in documents:
+        result = doc.document.export_to_markdown()
+    return result
 
 def main():
     """Start the server and handle incoming requests. This method will initialize the global basedir variable with the value provided as runtime argument, then start the FastMCP server.
@@ -689,6 +899,16 @@ def main():
     
     global basedir
     basedir = os.path.realpath(args.base_dir).replace("\\", "/")
+    
+    output = companion_llm(
+        prompt="Tell us when you are ready to support us",
+        max_tokens=1024,
+        temperature=0.2,
+        stop=["\nQuestion:"],
+        echo=False
+    )
+    
+    logger.info(f"Companion LLM answered: {output['choices'][0]['text']}")
     
     if args.transport == "sse":
         logger.info(f"Starting Source Tree MCP server")
