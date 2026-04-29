@@ -6,6 +6,7 @@ import datetime
 import lizard
 import pandas as pd
 import multiprocessing
+import re
 
 from llama_cpp import Llama
 from pygount import SourceAnalysis, ProjectSummary
@@ -16,7 +17,7 @@ from fastmcp import FastMCP
 from typing import Dict
 
 # The to llama-cpp-python compatible model
-MODEL_PATH = "models/Mixtral-8x7B-Instruct-v0.1-MXFP4_MOE-00001-of-00002.gguf"
+MODEL_PATH = "models/qwen3-moe-4x4b-16b-jan-polaris-instruct-power-house-q5_k_m.gguf"
 
 # We only allow to use maximum cores minus two in order to provide OS stability
 # and use as much resources as possible
@@ -151,11 +152,12 @@ def transpile_code(code:str) -> str:
 def ask_companion(question:str) -> str:
     """Ask the companion LLM a question.
     
-    The companion LLM acts as a expert in programming languages especially C++ and C#.
+    The companion LLM acts as a expert in programming languages especially C++ and C#. It accepts a maximum context size of 131072.
+    
     Parameters
     ----------
     question : str
-        The question to ask.
+        The question to ask. Max context size 131072.
 
     Returns
     -------
@@ -339,28 +341,29 @@ def grep(path:str, pattern:str, lines_before:int = 0, lines_after:int = 0) -> li
     
     result:list[tuple[int,str]] = []
     
-    with open(path, 'r') as f:
-        fifo:deque[tuple[int,str]] = deque(maxlen=lines_before)
-        
-        lines_left_to_append:int = lines_after
-        
-        for i, line in enumerate(f):
-            if pattern in line:
-                matches = list(fifo)
-                matches.append((i, line))
-                result.extend(matches)
-                
-                result.append((i, line))
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
             
-            if lines_left_to_append > 0:
-                result.append((i, line))
-                lines_left_to_append = lines_left_to_append - 1
-                continue
-            
-            fifo.append((i, line))
-        
-    return result
+            for i, line in enumerate(lines):
+                match = re.search(pattern, line)
+                if match is not None:
+                    # Add lines before
+                    start_idx = max(0, i - lines_before)
+                    for j in range(start_idx, i):
+                        result.append((j + 1, lines[j].rstrip('\n')))
+                    
+                    # Add the matching line
+                    result.append((i + 1, line.rstrip('\n')))
+                    
+                    # Add lines after
+                    end_idx = min(len(lines), i + lines_after + 1)
+                    for j in range(i + 1, end_idx):
+                        result.append((j + 1, lines[j].rstrip('\n')))
+    except Exception as e:
+        logger.error(f"Error in grep for pattern '{pattern}' in path '{path}': {e}")
     
+    return result
 
 @mcp.tool()
 def get_directories(path:str = "") -> list[str]:
