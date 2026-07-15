@@ -68,12 +68,14 @@ def sanitize_path(path: str) -> str:
     
     return realPath
 
-def get_files_from_git_tree(path: str, file_extension:str = "") -> list[str]:
+def get_files_from_git_tree(path: str, file_extension:str = "", recursive: bool = True) -> list[str]:
     """
     Get a list of all files in the given Git tree.
 
     Args:
         path (str): The path to the Git tree.
+        file_extension (str): Optional file extension filter (e.g., ``.txt``).
+        recursive (bool): If True, traverse recursively; if False, only top-level files.
 
     Returns:
         list[str]: A list of file paths or an empty list in case nothing found or error.
@@ -85,8 +87,26 @@ def get_files_from_git_tree(path: str, file_extension:str = "") -> list[str]:
         
         for entry in repo.commit().tree.traverse():
             epath = str(entry.path) # type: ignore
-            if len(path) == 0 or epath.startswith(path) and (file_extension == "" or epath.endswith(file_extension)):
-                entries.append(epath)   
+            # Check if path matches (empty path means all files from basedir)
+            path_matches = len(path) == 0 or epath.startswith(path)
+            # Check if extension matches (empty extension means all files)
+            ext_matches = file_extension == "" or epath.endswith(file_extension)
+            
+            if path_matches and ext_matches:
+                # For non-recursive, only include files directly under the path
+                if recursive:
+                    entries.append(epath)
+                else:
+                    # Calculate depth - count slashes after the path prefix
+                    if len(path) == 0:
+                        # Empty path means basedir, check if file is at root level
+                        if epath.count('/') == 0:
+                            entries.append(epath)
+                    else:
+                        # For a specific path, check if it's one level deep
+                        suffix = epath[len(path):]
+                        if suffix.startswith('/') and suffix.count('/') == 1:
+                            entries.append(epath)
         return entries
     except Exception as e:
         logger.error(e, exc_info=True)
@@ -196,15 +216,19 @@ def get_files(
     file_extension: Annotated[
         str,
         Field(description="Optional file extension filter (e.g., ``.txt``). Files must end with this extension to be included in the result. If an empty string is passed, all files are returned.")
-    ]
+    ],
+    recursive: Annotated[
+        bool,
+        Field(description="If True, traverse recursively through subdirectories. If False, only list files in the specified directory (non-recursive). Default is True.")
+    ] = True
 ) -> list[str]:
     """Retrieve a list of file names in *folder_path*, which is, if provided, a directory inside the global runtime parameter basedir provided at start of server, that have the specified *file_extension*. If no path is provided, all files in the global basedir are listed."""
     
     files:list[str] = []
     try:
         if is_git_repo():
-            files = get_files_from_git_tree(path, file_extension)
-        else:        
+            files = get_files_from_git_tree(path, file_extension, recursive)
+        else:
             dir = sanitize_path(os.path.join(basedir, path))
             
             logger.info(f"About to retrieve files from {dir}")
@@ -212,19 +236,27 @@ def get_files(
             entries = []
             
             if os.path.exists(dir):
-                entries = os.listdir(dir)
-            
-            if not file_extension == "":
-                logger.info(f"Filtering files with extension {file_extension}")
-                files = [f for f in entries if f.endswith(file_extension) and os.path.isfile(os.path.join(dir, f))]
-            else:
-                files = [f for f in entries if os.path.isfile(os.path.join(dir, f))]
+                if recursive:
+                    # Recursive traversal using os.walk
+                    for root, _, filenames in os.walk(dir):
+                        for filename in filenames:
+                            full_path = os.path.join(root, filename)
+                            if file_extension == "" or filename.endswith(file_extension):
+                                rel_path = os.path.relpath(full_path, dir).replace("\\", "/")
+                                files.append(rel_path)
+                else:
+                    # Non-recursive: only list top-level files
+                    entries = os.listdir(dir)
+                    if file_extension == "":
+                        files = [f for f in entries if os.path.isfile(os.path.join(dir, f))]
+                    else:
+                        files = [f for f in entries if f.endswith(file_extension) and os.path.isfile(os.path.join(dir, f))]
     except Exception as e:
         logger.error(e, exc_info=True)
 
     return files
 
-@mcp.tool()    
+@mcp.tool()
 def get_file_info(
     path: Annotated[str, Field(description="Path to the file for which information should be retrieved.")] 
 ) -> Dict[str, str]:
@@ -297,7 +329,9 @@ def get_file_content(
     fullPath = sanitize_path(os.path.join(basedir, path))
 
     if not os.path.isfile(fullPath):
-        return ""
+        error_msg = f"File not found: {fullPath}"
+        logger.warning(error_msg)
+        return error_msg
 
     content = ""
     try:    
@@ -315,7 +349,9 @@ def get_file_content(
                 with open(fullPath, 'r', encoding='latin-1', errors='replace') as fp:
                     content = fp.read()
     except Exception as e:
-        logger.error(e, exc_info=True)
+        error_msg = f"Error reading file {fullPath}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return error_msg
 
     return content
 
@@ -717,7 +753,8 @@ def make_directory(
 @mcp.tool()
 def write_file(
     path: Annotated[str, Field(description="The path where the file should be written.")],
-    content: Annotated[str, Field(description="The content to write to the file.")]
+    content: Annotated[str, Field(description="The content to write to the file.")],
+    append: Annotated[bool, Field(description="If True, the content will be appended to the file if it exists. If False, the file will be overwritten.")] = False
 ) -> str:
     """Write the given content to a file at the specified path. Creates parent directories if necessary. The path is relative to the global runtime parameter basedir provided at start of server. The returned string indicates whether the file was successfully written or not."""
     try:
@@ -726,7 +763,7 @@ def write_file(
         if not os.path.exists(parent_dir):
             logger.info(f"Creating directory {parent_dir}.")
             os.makedirs(parent_dir)
-        with open(path, 'w') as f:
+        with open(path, 'a' if append else 'w') as f:
             f.write(content)
         return "File written successfully."
     except Exception as e:
@@ -769,7 +806,683 @@ def read_online_pdf(
     except Exception as e:
         logger.error(e, exc_info=True)
         return ""
+
+def extract_c_dependencies(content: str) -> list[str]:
+    """
+    Extract C/C++ include dependencies from file content.
     
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        list[str]: List of included file paths (e.g., ["header.h", "utils.cpp"])
+    """
+    import re
+    pattern = r'#include\s*[<"]([^>"]+)[>"]'
+    matches = re.findall(pattern, content)
+    return matches
+
+def extract_csharp_dependencies(content: str) -> list[str]:
+    """
+    Extract C# using dependencies from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        list[str]: List of imported namespaces/modules (e.g., ["System", "System.Collections"])
+    """
+    import re
+    pattern = r'using\s+([^\s;]+)'
+    matches = re.findall(pattern, content)
+    return matches
+
+def extract_python_dependencies(content: str) -> list[str]:
+    """
+    Extract Python import dependencies from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        list[str]: List of imported modules (e.g., ["os", "sys", "module"])
+    """
+    import re
+    # Match both 'import x' and 'from x import y'
+    pattern = r'(?:import\s+([^\s,]+)|from\s+([^\s]+))'
+    matches = re.findall(pattern, content)
+    # Flatten the list of tuples and filter empty strings
+    return [m[0] or m[1] for m in matches if m[0] or m[1]]
+
+def extract_js_dependencies(content: str) -> list[str]:
+    """
+    Extract JavaScript/TypeScript import dependencies from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        list[str]: List of imported modules (e.g., ["./helper", "lodash"])
+    """
+    import re
+    # Match 'import ... from "module"' and 'import "module"'
+    pattern = r'(?:import\s+.*\s+from\s+[\'"]([^\'"]+)[\'"]|import\s+[\'"]([^\'"]+)[\'"])'
+    matches = re.findall(pattern, content)
+    return [m[0] or m[1] for m in matches if m[0] or m[1]]
+
+def extract_lua_dependencies(content: str) -> list[str]:
+    """
+    Extract Lua require dependencies from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        list[str]: List of required modules (e.g., ["module", "./helper", "../utils"])
+    """
+    import re
+    # Match 'require "module"' and 'require (module)' patterns
+    pattern = r'require\s*[\'"]([^\'"]+)[\'"]|require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'
+    matches = re.findall(pattern, content)
+    return [m[0] or m[1] for m in matches if m[0] or m[1]]
+
+def detect_circular_dependencies(graph: Dict[str, list[str]]) -> list[list[str]]:
+    """
+    Detect circular dependencies in the dependency graph using DFS.
+    
+    Args:
+        graph (Dict[str, list[str]]): The dependency graph as adjacency list.
+    
+    Returns:
+        list[list[str]]: List of cycles found, each cycle is a list of file paths.
+    """
+    cycles: list[list[str]] = []
+    visited: set[str] = set()
+    rec_stack: set[str] = set()
+    path: list[str] = []
+    
+    def dfs(node: str) -> None:
+        visited.add(node)
+        rec_stack.add(node)
+        path.append(node)
+        
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                dfs(neighbor)
+            elif neighbor in rec_stack:
+                # Found a cycle
+                cycle_start = path.index(neighbor)
+                cycle = path[cycle_start:] + [neighbor]
+                cycles.append(cycle)
+        
+        path.pop()
+        rec_stack.remove(node)
+    
+    for node in graph:
+        if node not in visited:
+            dfs(node)
+    
+    return cycles
+
+def build_dependency_graph(path: str, extensions: list[str]) -> Dict[str, list[str]]:
+    """
+    Build a dependency graph for all files with given extensions in the path.
+    
+    Args:
+        path (str): The base directory path.
+        extensions (list[str]): List of file extensions to analyze (e.g., ['.cpp', '.h', '.py']).
+    
+    Returns:
+        Dict[str, list[str]]: The dependency graph as adjacency list.
+    """
+    import os
+    from pathlib import Path
+    
+    graph: Dict[str, list[str]] = {}
+    
+    try:
+        for root, _, files in os.walk(path):
+            for file in files:
+                _, ext = os.path.splitext(file)
+                if ext in extensions:
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, path).replace("\\", "/")
+                    
+                    try:
+                        content = Path(full_path).read_text(encoding='utf-8', errors='replace')
+                        
+                        if ext in ['.cpp', '.c', '.h', '.hpp']:
+                            deps = extract_c_dependencies(content)
+                        elif ext == '.cs':
+                            deps = extract_csharp_dependencies(content)
+                        elif ext == '.py':
+                            deps = extract_python_dependencies(content)
+                        elif ext in ['.js', '.ts']:
+                            deps = extract_js_dependencies(content)
+                        elif ext == '.lua':
+                            deps = extract_lua_dependencies(content)
+                        else:
+                            deps = []
+                        
+                        # Filter out standard library imports for some languages
+                        filtered_deps = []
+                        for dep in deps:
+                            # Keep relative paths (start with . or /) and module names
+                            if dep.startswith(('.', '/')) or not dep.startswith('<'):
+                                filtered_deps.append(dep)
+                        
+                        graph[rel_path] = filtered_deps
+                    except Exception as e:
+                        logger.warning(f"Could not read {full_path}: {e}")
+                        graph[rel_path] = []
+    except Exception as e:
+        logger.error(e, exc_info=True)
+    
+    return graph
+
+@mcp.tool()
+def get_dependency_graph(
+    path: Annotated[str, Field(description="The path inside the source tree to analyze for dependencies. If empty, basedir is used.")]
+) -> str:
+    """Build a dependency graph for all source code files in the given path. Returns JSON with the graph adjacency list and detected circular dependencies.
+    
+    The returned JSON contains:
+    - `graph`: Adjacency list mapping each file to its direct dependencies
+    - `circular_dependencies`: List of cycles found in the dependency graph
+    
+    Supported languages: C/C++, C#, Python, JavaScript, TypeScript, Lua
+    """
+    logger.info(f"Building dependency graph for path: {path}")
+    
+    try:
+        analysis_path = sanitize_path(os.path.join(basedir, path)) if path else basedir
+        
+        # Define extensions to analyze
+        extensions = ['.cpp', '.c', '.h', '.hpp', '.cs', '.py', '.js', '.ts', '.lua']
+        
+        # Build the graph
+        graph = build_dependency_graph(analysis_path, extensions)
+        
+        # Detect circular dependencies
+        circular_deps = detect_circular_dependencies(graph)
+        
+        result = {
+            "graph": graph,
+            "circular_dependencies": circular_deps
+        }
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(e, exc_info=True)
+        return json.dumps({"error": str(e)})
+
+def parse_cpp_class_declarations(content: str) -> list[dict]:
+    """
+    Parse C++ header file content to extract class/function declarations.
+    
+    Args:
+        content (str): The header file content
+    
+    Returns:
+        list[dict]: List of declarations with name, signature, and body
+    """
+    declarations = []
+    
+    # Pattern for class declarations
+    class_pattern = r'class\s+(\w+)\s*(:\s*[^\{]*)?\s*\{([^}]*)\}'
+    
+    # Pattern for function declarations (not definitions)
+    # Matches: return_type name(params); but not with {
+    func_pattern = r'((?:virtual\s+)?(?:static\s+)?(?:const\s+)?(?:override\s+)?(?:\w+\s*::\s*)?[\w:<>,\*\&\s]+?)\s+(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:override\s*)?(?:final\s*)?(?:noexcept\s*)?\s*;'
+    
+    # Find class declarations
+    for match in re.finditer(class_pattern, content, re.DOTALL):
+        class_name = match.group(1)
+        class_body = match.group(3)
+        
+        # Parse methods within class
+        for func_match in re.finditer(func_pattern, class_body):
+            return_type = func_match.group(1).strip()
+            func_name = func_match.group(2)
+            
+            declarations.append({
+                'type': 'method',
+                'class': class_name,
+                'name': func_name,
+                'signature': f"{return_type} {func_name}(",
+                'body': '',
+                'is_declaration': True
+            })
+    
+    # Find standalone function declarations
+    for match in re.finditer(func_pattern, content):
+        return_type = match.group(1).strip()
+        func_name = match.group(2)
+        
+        declarations.append({
+            'type': 'function',
+            'class': None,
+            'name': func_name,
+            'signature': f"{return_type} {func_name}(",
+            'body': '',
+            'is_declaration': True
+        })
+    
+    return declarations
+
+
+def parse_cpp_definitions(content: str) -> list[dict]:
+    """
+    Parse C++ implementation file content to extract function definitions.
+    
+    Args:
+        content (str): The implementation file content
+    
+    Returns:
+        list[dict]: List of definitions with name, signature, and full body
+    """
+    definitions = []
+    
+    # Pattern for function definitions (with body)
+    func_pattern = r'((?:virtual\s+)?(?:static\s+)?(?:const\s+)?(?:override\s+)?(?:\w+\s*::\s*)?[\w:<>,\*\&\s]+?)\s+(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:override\s*)?(?:final\s*)?(?:noexcept\s*)?\s*\{'
+    
+    # Find function definitions
+    for match in re.finditer(func_pattern, content):
+        return_type = match.group(1).strip()
+        func_name = match.group(2)
+        
+        # Find the matching closing brace
+        start_pos = match.end() - 1  # Position of opening brace
+        brace_count = 1
+        end_pos = start_pos
+        
+        for i in range(start_pos + 1, len(content)):
+            if content[i] == '{':
+                brace_count += 1
+            elif content[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_pos = i
+                    break
+        
+        body = content[start_pos:end_pos + 1]
+        
+        definitions.append({
+            'type': 'function',
+            'name': func_name,
+            'signature': f"{return_type} {func_name}(",
+            'body': body,
+            'is_declaration': False
+        })
+    
+    return definitions
+
+
+def extract_c_functions(content: str) -> tuple[list[str], list[str]]:
+    """
+    Extract C/C++ function declarations and definitions from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        tuple[list[str], list[str]]: Tuple of (exported_functions, internal_functions)
+    """
+    exported = []
+    internal = []
+    
+    # Pattern for function definitions with body
+    func_pattern = r'((?:static\s+)?(?:inline\s+)?(?:const\s+)?(?:\w+\s*::\s*)?[\w:<>,\*\&\s]+?)\s+(\w+)\s*\([^)]*\)\s*(?:const\s*)?(?:override\s*)?(?:final\s*)?(?:noexcept\s*)?\s*\{'
+    
+    for match in re.finditer(func_pattern, content):
+        return_type = match.group(1).strip()
+        func_name = match.group(2)
+        signature = f"{return_type} {func_name}("
+        
+        # Check if function is static (internal) or not
+        if 'static' in return_type.lower() or return_type.startswith('static'):
+            internal.append(signature + " end")
+        else:
+            exported.append(signature + " end")
+    
+    return exported, internal
+
+
+def fuse_logical_unit(header_content: str, impl_content: str) -> str:
+    """
+    Fuse header and implementation content by inserting implementations into declarations.
+    
+    Args:
+        header_content (str): The header file content
+        impl_content (str): The implementation file content
+    
+    Returns:
+        str: The fused virtual unit representation
+    """
+    # Parse declarations from header
+    declarations = parse_cpp_class_declarations(header_content)
+    
+    # Parse definitions from implementation
+    definitions = parse_cpp_definitions(impl_content)
+    
+    # Create a map of function names to their definitions
+    def_map = {d['name']: d for d in definitions}
+    
+    # Replace declarations with their definitions
+    fused_content = header_content
+    
+    for decl in declarations:
+        if decl['name'] in def_map:
+            definition = def_map[decl['name']]
+            
+            # Find and replace the declaration with the definition
+            pattern = re.escape(decl['signature']) + r"[^;]*;"
+            replacement = definition['body']
+            
+            fused_content = re.sub(pattern, replacement, fused_content, count=1)
+    
+    return fused_content
+
+
+def find_unit_files(unit_name: str) -> list[str]:
+    """
+    Find all files related to a logical unit.
+    
+    Args:
+        unit_name (str): The name of the unit (e.g., "user")
+    
+    Returns:
+        list[str]: List of file paths related to the unit
+    """
+    import os
+    
+    # Common extensions for C++ units
+    extensions = ['.h', '.hpp', '.hxx', '.c', '.cpp', '.cxx']
+    
+    files = []
+    
+    try:
+        # Search in basedir for files matching the unit name
+        for root, _, filenames in os.walk(basedir):
+            for filename in filenames:
+                base, ext = os.path.splitext(filename)
+                if base == unit_name and ext in extensions:
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, basedir).replace("\\", "/")
+                    files.append(rel_path)
+    except Exception as e:
+        logger.error(f"Error finding unit files for {unit_name}: {e}")
+    
+    return sorted(files)
+
+
+@mcp.tool()
+def get_logical_unit(
+    unit_name: Annotated[str, Field(description="The name of the logical unit to retrieve. For example, 'user' would combine user.h and user.cpp into a single virtual representation.")]
+) -> str:
+    """Retrieve a fusionized virtual representation of a logical unit. If a unit is split across multiple files (e.g., header and implementation), this function combines them into a single cohesive view where implementations are inserted into their corresponding declarations."""
+    logger.info(f"get_logical_unit called with unit_name: {unit_name}")
+    
+    try:
+        # Find all files related to this unit
+        unit_files = find_unit_files(unit_name)
+        
+        if not unit_files:
+            return f"No files found for unit '{unit_name}'"
+        
+        # For C++ units, combine header and implementation
+        header_content = ""
+        impl_content = ""
+        
+        for file_path in unit_files:
+            full_path = sanitize_path(os.path.join(basedir, file_path))
+            
+            try:
+                content = Path(full_path).read_text(encoding='utf-8', errors='replace')
+                
+                ext = os.path.splitext(file_path)[1]
+                
+                if ext in ['.h', '.hpp', '.hxx']:
+                    header_content = content
+                elif ext in ['.c', '.cpp', '.cxx']:
+                    impl_content = content
+            except Exception as e:
+                logger.warning(f"Could not read file {full_path}: {e}")
+        
+        # If we have both header and implementation, fuse them
+        if header_content and impl_content:
+            return fuse_logical_unit(header_content, impl_content)
+        elif header_content:
+            return header_content
+        elif impl_content:
+            return impl_content
+        else:
+            # Return all files concatenated if no fusion is possible
+            return "\n\n".join([Path(sanitize_path(os.path.join(basedir, f))).read_text(encoding='utf-8', errors='replace') for f in unit_files])
+    
+    except Exception as e:
+        logger.error(e, exc_info=True)
+        return f"Error retrieving logical unit '{unit_name}': {str(e)}"
+
+
+def extract_csharp_functions(content: str) -> tuple[list[str], list[str]]:
+    """
+    Extract C# function declarations and definitions from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        tuple[list[str], list[str]]: Tuple of (exported_functions, internal_functions)
+    """
+    exported = []
+    internal = []
+    
+    # Pattern for method/function definitions
+    func_pattern = r'(?:public|private|protected|internal)?\s*(?:static\s+)?(?:async\s+)?(?:override\s+)?(?:virtual\s+)?(?:new\s+)?(?:\w+(?:<[^>]+>)?\s+)?(\w+)\s*\([^)]*\)\s*\{'
+    
+    for match in re.finditer(func_pattern, content):
+        func_name = match.group(1)
+        
+        # Determine if internal based on access modifier
+        full_match = match.group(0)
+        if 'private' in full_match or 'internal' in full_match:
+            internal.append(f"function {func_name}() end")
+        else:
+            exported.append(f"function {func_name}() end")
+    
+    return exported, internal
+
+
+def extract_python_functions(content: str) -> tuple[list[str], list[str]]:
+    """
+    Extract Python function definitions from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        tuple[list[str], list[str]]: Tuple of (exported_functions, internal_functions)
+    """
+    exported = []
+    internal = []
+    
+    # Pattern for function definitions
+    func_pattern = r'def\s+(\w+)\s*\([^)]*\)\s*:'
+    
+    for match in re.finditer(func_pattern, content):
+        func_name = match.group(1)
+        
+        # Internal functions start with underscore
+        if func_name.startswith('_'):
+            internal.append(f"def {func_name}() end")
+        else:
+            exported.append(f"def {func_name}() end")
+    
+    return exported, internal
+
+
+def extract_js_functions(content: str) -> tuple[list[str], list[str]]:
+    """
+    Extract JavaScript/TypeScript function declarations and definitions from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        tuple[list[str], list[str]]: Tuple of (exported_functions, internal_functions)
+    """
+    exported = []
+    internal = []
+    
+    # Patterns for different function types
+    patterns = [
+        r'function\s+(\w+)\s*\([^)]*\)\s*\{',  # function name()
+        r'(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function\s*\([^)]*\)\s*\{',  # const name = function()
+        r'(?:export\s+)?const\s+(\w+)\s*=\s*\([^)]*\)\s*=>\s*',  # const name = () =>
+        r'(?:export\s+)?function\s*(\w+)\s*\([^)]*\)\s*:',  # TypeScript function declaration
+    ]
+    
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            func_name = match.group(1)
+            
+            # Exported functions have 'export' keyword
+            full_match = match.group(0)
+            if 'export' in full_match:
+                exported.append(f"function {func_name}() end")
+            else:
+                internal.append(f"function {func_name}() end")
+    
+    return exported, internal
+
+
+def extract_lua_functions(content: str) -> tuple[list[str], list[str]]:
+    """
+    Extract Lua function definitions from file content.
+    
+    Args:
+        content (str): The source code content to analyze.
+    
+    Returns:
+        tuple[list[str], list[str]]: Tuple of (exported_functions, internal_functions)
+    """
+    exported = []
+    internal = []
+    
+    # Pattern for function definitions
+    func_pattern = r'(?:local\s+)?function\s+(\w+)\s*\([^)]*\)'
+    
+    for match in re.finditer(func_pattern, content):
+        func_name = match.group(1)
+        
+        # Local functions are internal
+        if match.group(0).startswith('local'):
+            internal.append(f"local function {func_name}() end")
+        else:
+            exported.append(f"function {func_name}() end")
+    
+    return exported, internal
+
+
+@mcp.tool()
+def get_source_signature(
+    path: Annotated[str, Field(description="The path to the source file (relative to basedir) for which to generate a source signature. Supported languages: C, C++, C#, Python, JavaScript, TypeScript, Lua")]
+) -> str:
+    """Generate a compact source signature for a given file in markdown format. Returns module dependencies and function signatures (exported and internal/local functions).
+    
+    Supported languages: C, C++, C#, Python, JavaScript, TypeScript, Lua
+    
+    Example output:
+    ```
+    # SOURCE SIGNATURE FOR: src/network/router.lua
+    
+    -- Module Dependencies:
+    -- [Requires: "utils.logger", "config.routes"]
+    
+    -- Exported Functions:
+    function Router.new(config) end
+    function Router:register_route(path, handler) end
+    function Router:dispatch(request) end
+    
+    -- Internal/Local Functions:
+    local function parse_url(url) end
+    local function validate_headers(headers) end
+    ```
+    """
+    return get_source_signature_impl(path)
+
+
+def get_source_signature_impl(path: str) -> str:
+    """Internal implementation of source signature generation."""
+    full_path = sanitize_path(os.path.join(basedir, path))
+    
+    if not os.path.isfile(full_path):
+        return f"# SOURCE SIGNATURE FOR: {path}\n\nError: File not found"
+    
+    try:
+        content = Path(full_path).read_text(encoding='utf-8', errors='replace')
+        _, ext = os.path.splitext(path)
+        
+        # Get dependencies based on file extension
+        dependencies = []
+        if ext in ['.c', '.h', '.cpp', '.hpp']:
+            dependencies = extract_c_dependencies(content)
+        elif ext == '.cs':
+            dependencies = extract_csharp_dependencies(content)
+        elif ext == '.py':
+            dependencies = extract_python_dependencies(content)
+        elif ext in ['.js', '.ts']:
+            dependencies = extract_js_dependencies(content)
+        elif ext == '.lua':
+            dependencies = extract_lua_dependencies(content)
+        
+        # Get functions based on file extension
+        exported_funcs, internal_funcs = [], []
+        if ext in ['.c', '.h', '.cpp', '.hpp']:
+            exported_funcs, internal_funcs = extract_c_functions(content)
+        elif ext == '.cs':
+            exported_funcs, internal_funcs = extract_csharp_functions(content)
+        elif ext == '.py':
+            exported_funcs, internal_funcs = extract_python_functions(content)
+        elif ext in ['.js', '.ts']:
+            exported_funcs, internal_funcs = extract_js_functions(content)
+        elif ext == '.lua':
+            exported_funcs, internal_funcs = extract_lua_functions(content)
+        
+        # Build markdown output
+        lines = []
+        lines.append(f"# SOURCE SIGNATURE FOR: {path}")
+        lines.append("")
+        
+        # Dependencies section
+        if dependencies:
+            lines.append("-- Module Dependencies:")
+            for dep in sorted(set(dependencies)):
+                lines.append(f"-- [Requires: \"{dep}\"]")
+            lines.append("")
+        
+        # Exported functions section
+        if exported_funcs:
+            lines.append("-- Exported Functions:")
+            for func in exported_funcs:
+                lines.append(func)
+            lines.append("")
+        
+        # Internal functions section
+        if internal_funcs:
+            lines.append("-- Internal/Local Functions:")
+            for func in internal_funcs:
+                lines.append(func)
+        
+        return "\n".join(lines)
+    
+    except Exception as e:
+        logger.error(f"Error generating source signature for {path}: {e}")
+        return f"# SOURCE SIGNATURE FOR: {path}\n\nError: {str(e)}"
+
+
+### Main method to start the server
 def main():
     """Start the server and handle incoming requests. This method will initialize the global basedir variable with the value provided as runtime argument, then start the FastMCP server.
 
@@ -823,6 +1536,8 @@ def main():
         
         logger.info(f"Companion LLM answered: {output['choices'][0]['text']}")
 
+        ask_companion.__name__ = "sourcetreemcp_ask_companion"
+        transpile_code.__name__ = "sourcetreemcp_transpile_code"
         mcp.add_tool(ask_companion)
         mcp.add_tool(transpile_code)
     
